@@ -1,8 +1,6 @@
 /**
- * MovieZone Data API — IDs y meta (anime / series / películas)
- * Deploy: Cloudflare Worker
- *
- * Env opcional: TMDB_API_KEY
+ * MovieZone Data API — IDs + ficha (sinopsis, rating, géneros, estudios…)
+ * Env: TMDB_API_KEY (opcional, para movie/series)
  */
 
 const CINEMETA = 'https://v3-cinemeta.strem.io';
@@ -10,6 +8,13 @@ const ANIZIP = 'https://api.ani.zip/mappings';
 const JIKAN = 'https://api.jikan.moe/v4';
 const TMDB = 'https://api.themoviedb.org/3';
 const METAHUB = 'https://images.metahub.space';
+
+const SEASON_ES = {
+  winter: 'Invierno',
+  spring: 'Primavera',
+  summer: 'Verano',
+  fall: 'Otoño',
+};
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -23,11 +28,91 @@ function json(data, status = 200) {
 }
 
 function metahubImages(imdbId) {
-  if (!imdbId || !/^tt\d+$/i.test(imdbId)) return null;
+  if (!imdbId || !/^tt\d+$/i.test(String(imdbId))) return null;
   return {
     poster: `${METAHUB}/poster/medium/${imdbId}/img`,
     backdrop: `${METAHUB}/background/medium/${imdbId}/img`,
     logo: `${METAHUB}/logo/medium/${imdbId}/img`,
+  };
+}
+
+function estadoEs(status) {
+  const s = String(status || '').toLowerCase();
+  if (s.includes('airing') && !s.includes('finished')) return 'En emisión';
+  if (s.includes('finished') || s.includes('complete')) return 'Finalizado';
+  if (s.includes('not yet') || s.includes('upcoming')) return 'Próximamente';
+  if (s.includes('hiatus')) return 'En pausa';
+  return status || null;
+}
+
+function tipoEs(type) {
+  const t = String(type || '').toLowerCase();
+  if (t === 'tv' || t === 'serie' || t === 'series') return 'Serie';
+  if (t === 'movie' || t === 'pelicula') return 'Película';
+  if (t === 'ova') return 'OVA';
+  if (t === 'ona') return 'ONA';
+  if (t === 'special') return 'Especial';
+  if (t === 'music') return 'Música';
+  return type || null;
+}
+
+/** Ficha completa desde MAL/Jikan */
+async function fichaJikan(malId) {
+  const res = await fetch(`${JIKAN}/anime/${encodeURIComponent(malId)}/full`, {
+    headers: { Accept: 'application/json', 'User-Agent': 'MovieZoneData/1.0' },
+  });
+  if (!res.ok) {
+    // fallback sin /full
+    const r2 = await fetch(`${JIKAN}/anime/${encodeURIComponent(malId)}`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!r2.ok) return null;
+    const d2 = await r2.json();
+    return mapJikanAnime(d2.data);
+  }
+  const data = await res.json();
+  return mapJikanAnime(data.data);
+}
+
+function mapJikanAnime(a) {
+  if (!a) return null;
+  const season =
+    a.season && a.year
+      ? `${SEASON_ES[String(a.season).toLowerCase()] || a.season} ${a.year}`
+      : null;
+  const dur =
+    a.duration && a.duration !== 'Unknown'
+      ? a.duration.replace(' per ep', '').trim()
+      : null;
+  const emitido = a.aired?.from ? String(a.aired.from).slice(0, 10) : null;
+  const posterMal =
+    a.images?.jpg?.large_image_url || a.images?.jpg?.image_url || null;
+
+  return {
+    mal_id: a.mal_id,
+    titulo: a.title_english || a.title,
+    titulo_original: a.title_japanese || a.title || null,
+    titulo_romaji: a.title || null,
+    tipo: tipoEs(a.type),
+    generos: (a.genres || []).map((g) => g.name).filter(Boolean),
+    studios: (a.studios || []).map((s) => s.name).filter(Boolean),
+    temporada: season,
+    idiomas: ['Japonés'],
+    episodios: a.episodes != null ? a.episodes : null,
+    duracion: dur || 'Desconocido',
+    emitido,
+    estado: estadoEs(a.status),
+    calidad: null,
+    puntuacion: a.score != null ? Number(a.score) : null,
+    year: a.year
+      ? String(a.year)
+      : emitido
+        ? emitido.slice(0, 4)
+        : null,
+    descripcion: a.synopsis || null,
+    en_emision: /airing/i.test(String(a.status || '')) && !/finished/i.test(String(a.status || '')),
+    poster_mal: posterMal,
+    source_meta: 'jikan',
   };
 }
 
@@ -39,7 +124,6 @@ async function fromAnizipMal(malId) {
   const data = await res.json();
   const m = data.mappings || data;
   if (!m) return null;
-
   let imdb_season = null;
   const eps = data.episodes;
   if (eps && typeof eps === 'object') {
@@ -50,7 +134,6 @@ async function fromAnizipMal(malId) {
       }
     }
   }
-
   return {
     mal_id: m.mal_id || Number(malId),
     imdb_id: m.imdb_id && /^tt\d+$/i.test(m.imdb_id) ? m.imdb_id : null,
@@ -60,7 +143,6 @@ async function fromAnizipMal(malId) {
     kitsu_id: m.kitsu_id || null,
     anidb_id: m.anidb_id || null,
     imdb_season,
-    type: (m.type || 'TV').toLowerCase() === 'movie' ? 'movie' : 'anime',
   };
 }
 
@@ -71,11 +153,9 @@ async function malFromTitle(q, year) {
   const data = await res.json();
   const list = data.data || [];
   if (!list.length) return null;
-
   const qn = q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   let best = null;
   let bestScore = -1;
-
   for (const a of list) {
     const names = [a.title, a.title_english, a.title_japanese]
       .filter(Boolean)
@@ -94,163 +174,189 @@ async function malFromTitle(q, year) {
     }
   }
   if (!best || bestScore < 40) return null;
-  return {
-    mal_id: best.mal_id,
-    title: best.title_english || best.title,
-    year: best.year || null,
-  };
+  return best.mal_id;
 }
 
-async function fromTmdbSearch(q, type, apiKey) {
+async function fichaTmdb(q, type, apiKey) {
   if (!apiKey) return null;
   const kind = type === 'movie' ? 'movie' : 'tv';
-  const searchUrl =
-    `${TMDB}/search/${kind}?api_key=${apiKey}&query=${encodeURIComponent(q)}&language=es-ES`;
-  const sRes = await fetch(searchUrl);
+  const sRes = await fetch(
+    `${TMDB}/search/${kind}?api_key=${apiKey}&query=${encodeURIComponent(q)}&language=es-ES`
+  );
   if (!sRes.ok) return null;
   const sData = await sRes.json();
   const hit = (sData.results || [])[0];
   if (!hit) return null;
 
-  const extUrl = `${TMDB}/${kind}/${hit.id}/external_ids?api_key=${apiKey}`;
-  const eRes = await fetch(extUrl);
-  if (!eRes.ok) return null;
-  const ext = await eRes.json();
+  const detailUrl =
+    `${TMDB}/${kind}/${hit.id}?api_key=${apiKey}&language=es-ES&append_to_response=external_ids`;
+  const dRes = await fetch(detailUrl);
+  if (!dRes.ok) return null;
+  const d = await dRes.json();
+  const ext = d.external_ids || {};
 
   return {
-    tmdb_id: hit.id,
-    imdb_id: ext.imdb_id || null,
-    tvdb_id: ext.tvdb_id || null,
-    title: hit.title || hit.name,
-    year: (hit.release_date || hit.first_air_date || '').slice(0, 4) || null,
-    type: kind === 'movie' ? 'movie' : 'series',
+    ids: {
+      imdb_id: ext.imdb_id || null,
+      tmdb_id: d.id,
+      tvdb_id: ext.tvdb_id || null,
+    },
+    titulo: d.title || d.name,
+    titulo_original: d.original_title || d.original_name || null,
+    tipo: kind === 'movie' ? 'Película' : 'Serie',
+    generos: (d.genres || []).map((g) => g.name),
+    studios: (d.production_companies || []).map((c) => c.name).slice(0, 5),
+    temporada: null,
+    idiomas: (d.spoken_languages || []).map((l) => l.name || l.english_name),
+    episodios: d.number_of_episodes ?? null,
+    duracion: kind === 'movie'
+      ? (d.runtime ? `${d.runtime} min` : null)
+      : (d.episode_run_time?.[0] ? `${d.episode_run_time[0]} min` : null),
+    emitido: (d.release_date || d.first_air_date || null),
+    estado: d.status || null,
+    calidad: null,
+    puntuacion: d.vote_average != null ? Number(d.vote_average) : null,
+    year: (d.release_date || d.first_air_date || '').slice(0, 4) || null,
+    descripcion: d.overview || null,
+    source_meta: 'tmdb',
   };
 }
 
-async function fromCinemetaImdb(imdbId, typeHint) {
-  const kinds =
-    typeHint === 'movie' ? ['movie', 'series'] : ['series', 'movie'];
-  for (const kind of kinds) {
-    try {
-      const res = await fetch(`${CINEMETA}/meta/${kind}/${imdbId}.json`, {
-        headers: { Accept: 'application/json' },
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      const meta = data.meta;
-      if (!meta) continue;
-      return {
-        imdb_id: meta.imdb_id || imdbId,
-        title: meta.name,
-        type: meta.type === 'movie' ? 'movie' : 'series',
-        year: meta.year || (meta.releaseInfo || '').slice(0, 4) || null,
-        rating: meta.imdbRating || null,
-      };
-    } catch (_) {}
-  }
-  return { imdb_id: imdbId };
+function packAnime(ids, ficha) {
+  const imdb = ids?.imdb_id || null;
+  const images = metahubImages(imdb) || {};
+  if (ficha?.poster_mal) images.poster_mal = ficha.poster_mal;
+  if (!images.poster && ficha?.poster_mal) images.poster = ficha.poster_mal;
+
+  return {
+    ok: true,
+    ids: {
+      mal_id: ids?.mal_id || ficha?.mal_id || null,
+      imdb_id: imdb,
+      tmdb_id: ids?.tmdb_id || null,
+      tvdb_id: ids?.tvdb_id || null,
+      anilist_id: ids?.anilist_id || null,
+      kitsu_id: ids?.kitsu_id || null,
+      anidb_id: ids?.anidb_id || null,
+      imdb_season: ids?.imdb_season ?? null,
+    },
+    titulo: ficha?.titulo || null,
+    titulo_original: ficha?.titulo_original || null,
+    tipo: ficha?.tipo || 'Serie',
+    generos: ficha?.generos || [],
+    studios: ficha?.studios || [],
+    temporada: ficha?.temporada || null,
+    idiomas: ficha?.idiomas || ['Japonés'],
+    episodios: ficha?.episodios ?? null,
+    duracion: ficha?.duracion || 'Desconocido',
+    emitido: ficha?.emitido || null,
+    estado: ficha?.estado || null,
+    calidad: ficha?.calidad ?? null,
+    puntuacion: ficha?.puntuacion ?? null,
+    year: ficha?.year || null,
+    descripcion: ficha?.descripcion || null,
+    en_emision: ficha?.en_emision ?? null,
+    images,
+    source_meta: ficha?.source_meta || 'jikan+anizip',
+  };
 }
 
-async function resolveIds(params, env) {
+async function resolve(params, env) {
   const mal = params.get('mal') || params.get('mal_id');
   const imdb = params.get('imdb') || params.get('imdb_id');
   const q = (params.get('q') || params.get('query') || '').trim();
-  const type = (params.get('type') || 'anime').toLowerCase(); // anime | series | movie
+  const type = (params.get('type') || 'anime').toLowerCase();
   const year = params.get('year');
 
-  // 1) Por MAL
+  // —— Por MAL ——
   if (mal) {
-    const map = await fromAnizipMal(mal);
-    if (!map) return { ok: false, error: 'mal_not_found', query: { mal: Number(mal) } };
-    const images = metahubImages(map.imdb_id);
-    let title = null;
-    if (map.imdb_id) {
-      const cm = await fromCinemetaImdb(map.imdb_id, map.type);
-      title = cm.title || null;
+    const [map, ficha] = await Promise.all([
+      fromAnizipMal(mal),
+      fichaJikan(mal),
+    ]);
+    if (!ficha && !map) {
+      return { ok: false, error: 'mal_not_found', query: { mal: Number(mal) } };
     }
+    const body = packAnime(map || { mal_id: Number(mal) }, ficha);
+    body.query = { mal: Number(mal) };
+    return body;
+  }
+
+  // —— Por texto anime ——
+  if (q && (type === 'anime' || type === 'animes')) {
+    const malId = await malFromTitle(q, year);
+    if (!malId) return { ok: false, error: 'not_found', query: { q, type } };
+    const [map, ficha] = await Promise.all([
+      fromAnizipMal(malId),
+      fichaJikan(malId),
+    ]);
+    const body = packAnime(map || { mal_id: malId }, ficha);
+    body.query = { q, type: 'anime' };
+    return body;
+  }
+
+  // —— Movie / series (TMDB) ——
+  if (q && (type === 'movie' || type === 'serie' || type === 'series' || type === 'tv')) {
+    const f = await fichaTmdb(q, type === 'movie' ? 'movie' : 'series', env.TMDB_API_KEY);
+    if (!f) return { ok: false, error: 'not_found', query: { q, type }, hint: 'Set TMDB_API_KEY' };
     return {
       ok: true,
-      query: { mal: Number(mal) },
-      ids: {
-        mal_id: map.mal_id,
-        imdb_id: map.imdb_id,
-        tmdb_id: map.tmdb_id,
-        tvdb_id: map.tvdb_id,
-        anilist_id: map.anilist_id,
-        kitsu_id: map.kitsu_id,
-        anidb_id: map.anidb_id,
-        imdb_season: map.imdb_season,
-      },
-      title,
-      type: map.type,
-      images,
+      query: { q, type },
+      ids: f.ids,
+      titulo: f.titulo,
+      titulo_original: f.titulo_original,
+      tipo: f.tipo,
+      generos: f.generos,
+      studios: f.studios,
+      temporada: null,
+      idiomas: f.idiomas,
+      episodios: f.episodios,
+      duracion: f.duracion || 'Desconocido',
+      emitido: f.emitido,
+      estado: f.estado,
+      calidad: null,
+      puntuacion: f.puntuacion,
+      year: f.year,
+      descripcion: f.descripcion,
+      images: metahubImages(f.ids.imdb_id),
+      source_meta: 'tmdb',
     };
   }
 
-  // 2) Por IMDb
+  // —— Solo IMDb (meta ligera Cinemeta) ——
   if (imdb && /^tt\d+$/i.test(imdb)) {
-    const cm = await fromCinemetaImdb(imdb, type === 'movie' ? 'movie' : 'series');
-    return {
-      ok: true,
-      query: { imdb },
-      ids: { imdb_id: cm.imdb_id || imdb },
-      title: cm.title || null,
-      type: cm.type || type,
-      year: cm.year || null,
-      rating: cm.rating || null,
-      images: metahubImages(imdb),
-    };
-  }
-
-  // 3) Por texto
-  if (q) {
-    if (type === 'anime') {
-      const malHit = await malFromTitle(q, year);
-      if (malHit?.mal_id) {
-        const map = await fromAnizipMal(malHit.mal_id);
-        if (map) {
-          return {
-            ok: true,
-            query: { q, type: 'anime' },
-            ids: {
-              mal_id: map.mal_id,
-              imdb_id: map.imdb_id,
-              tmdb_id: map.tmdb_id,
-              tvdb_id: map.tvdb_id,
-              anilist_id: map.anilist_id,
-              imdb_season: map.imdb_season,
-            },
-            title: malHit.title,
-            type: 'anime',
-            images: metahubImages(map.imdb_id),
-          };
-        }
-      }
+    const kinds = type === 'movie' ? ['movie', 'series'] : ['series', 'movie'];
+    for (const kind of kinds) {
+      try {
+        const res = await fetch(`${CINEMETA}/meta/${kind}/${imdb}.json`);
+        if (!res.ok) continue;
+        const { meta } = await res.json();
+        if (!meta) continue;
+        return {
+          ok: true,
+          query: { imdb },
+          ids: { imdb_id: meta.imdb_id || imdb },
+          titulo: meta.name,
+          titulo_original: null,
+          tipo: meta.type === 'movie' ? 'Película' : 'Serie',
+          generos: meta.genre || meta.genres || [],
+          studios: [],
+          temporada: null,
+          idiomas: [],
+          episodios: null,
+          duracion: meta.runtime || 'Desconocido',
+          emitido: meta.released ? String(meta.released).slice(0, 10) : null,
+          estado: meta.status || null,
+          calidad: null,
+          puntuacion: meta.imdbRating ? Number(meta.imdbRating) : null,
+          year: meta.year || null,
+          descripcion: meta.description || null,
+          images: metahubImages(imdb),
+          source_meta: 'cinemeta',
+        };
+      } catch (_) {}
     }
-
-    // movie / series → TMDB
-    const tmdb = await fromTmdbSearch(
-      q,
-      type === 'movie' ? 'movie' : 'series',
-      env.TMDB_API_KEY
-    );
-    if (tmdb?.imdb_id) {
-      return {
-        ok: true,
-        query: { q, type },
-        ids: {
-          imdb_id: tmdb.imdb_id,
-          tmdb_id: tmdb.tmdb_id,
-          tvdb_id: tmdb.tvdb_id,
-        },
-        title: tmdb.title,
-        type: tmdb.type,
-        year: tmdb.year,
-        images: metahubImages(tmdb.imdb_id),
-      };
-    }
-
-    return { ok: false, error: 'not_found', query: { q, type } };
+    return { ok: false, error: 'imdb_not_found', query: { imdb } };
   }
 
   return {
@@ -258,10 +364,10 @@ async function resolveIds(params, env) {
     error: 'missing_params',
     usage: {
       mal: '/ids?mal=57658',
-      imdb: '/ids?imdb=tt0388629',
       anime: '/ids?q=one+piece&type=anime',
       movie: '/ids?q=matrix&type=movie',
       series: '/ids?q=breaking+bad&type=series',
+      imdb: '/ids?imdb=tt0388629',
     },
   };
 }
@@ -269,7 +375,6 @@ async function resolveIds(params, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
@@ -279,24 +384,17 @@ export default {
         },
       });
     }
-
-    if (url.pathname === '/health' || url.pathname === '/') {
-      return json({
-        ok: true,
-        service: 'moviezone-data-api',
-        endpoints: ['/ids', '/health'],
-      });
+    if (url.pathname === '/' || url.pathname === '/health') {
+      return json({ ok: true, service: 'moviezone-data-api', endpoints: ['/ids'] });
     }
-
-    if (url.pathname === '/ids') {
+    if (url.pathname === '/ids' || url.pathname === '/meta') {
       try {
-        const result = await resolveIds(url.searchParams, env || {});
+        const result = await resolve(url.searchParams, env || {});
         return json(result, result.ok ? 200 : 400);
       } catch (e) {
         return json({ ok: false, error: String(e.message || e) }, 500);
       }
     }
-
     return json({ ok: false, error: 'not_found' }, 404);
   },
 };
