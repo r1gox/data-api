@@ -1,0 +1,5 @@
+name = "moviezone-data-api"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# wrangler secret put TMDB_API_KEY
