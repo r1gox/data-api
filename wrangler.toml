@@ -1,5 +1,12 @@
-name = "moviezone-data-api"
+name = "tmdb-meta-api"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
-# wrangler secret put TMDB_API_KEY
+# Secrets (NO subir la key al repo):
+#   npx wrangler secret put TMDB_API_KEY
+#   npx wrangler secret put TMDB_TOKEN   # opcional (v4 Bearer)
+#
+# O en el dashboard de Cloudflare → Worker → Settings → Variables
+
+[vars]
+CACHE_TTL = "21600"
