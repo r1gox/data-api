@@ -32,7 +32,7 @@ export default {
         return json({
           ok: true,
           name: "tmdb-meta-api",
-          version: "1.0.3",
+          version: "1.0.4-temp-key",
           has_key: resolved.ok,
           key_source: resolved.source,
           env_keys: Object.keys(env).sort(),
@@ -113,6 +113,12 @@ function resolveTmdbKey(env) {
     key = String(env.TMDB_API_KEY || "").trim();
     if (token) source = "TMDB_TOKEN";
     else if (key) source = "TMDB_API_KEY";
+  }
+
+  // TEMPORAL — solo prueba. BORRAR tras verificar y regenerar key en TMDB.
+  if (!token && !key) {
+    key = "f5149878cdff80ef89d0910a73750279";
+    source = "HARDCODED_TEMP";
   }
 
   if (token) return { ok: true, source, token, key: "" };
