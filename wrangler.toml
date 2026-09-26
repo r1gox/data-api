@@ -1,4 +1,4 @@
-name = "tmdb-meta-api"
+name = "data-api"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
