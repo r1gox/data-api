@@ -32,7 +32,7 @@ export default {
         return json({
           ok: true,
           name: "tmdb-meta-api",
-          version: "1.2.0",
+          version: "1.3.0-moviezone",
           has_key: resolved.ok,
           key_source: resolved.source,
           env_keys: Object.keys(env).sort(),
@@ -59,7 +59,18 @@ export default {
         const data = await getSeason(env, m[1], 0);
         data.es_especiales = true;
         data.formato = "Especiales";
-        return json({ schema_version: 3, generation: 1, season: data }, 200, cacheHeaders(env));
+        return json({
+          success: true,
+          fuente: "tmdb",
+          source_id: "tmdb",
+          tipo: "Especiales",
+          tmdb_id: Number(m[1]),
+          temporada: 0,
+          episodios: data.episode_count,
+          lista: (data.episodes || []).map(epToMzLista),
+          season: data,
+          schema_version: 3,
+        }, 200, cacheHeaders(env));
       }
 
       m = path.match(/^\/v1\/items\/tv\/(\d+)\/season\/(\d+)$/);
@@ -69,7 +80,18 @@ export default {
           data.es_especiales = true;
           data.formato = "Especiales";
         }
-        return json({ schema_version: 3, generation: 1, season: data }, 200, cacheHeaders(env));
+        return json({
+          success: true,
+          fuente: "tmdb",
+          source_id: "tmdb",
+          tipo: Number(m[2]) === 0 ? "Especiales" : "Temporada",
+          tmdb_id: Number(m[1]),
+          temporada: data.season_number,
+          episodios: data.episode_count,
+          lista: (data.episodes || []).map(epToMzLista),
+          season: data,
+          schema_version: 3,
+        }, 200, cacheHeaders(env));
       }
 
       m = path.match(/^\/v1\/items\/(movie|tv)\/(\d+)$/);
@@ -93,7 +115,11 @@ export default {
           withRelated,
           maxSeasons,
         });
-        return json({ schema_version: 3, generation: 1, item: data }, 200, cacheHeaders(env));
+        // Formato compatible con vimeos-resolver / MovieZone
+        const mz = toMovieZone(data, m[1], {
+          withEpisodes: withEpisodes || withSpecials,
+        });
+        return json(mz, 200, cacheHeaders(env));
       }
 
       m = path.match(/^\/v1\/cards\/(movie|tv)\/(\d+)$/);
@@ -681,6 +707,204 @@ async function nowPlaying(env, type) {
   });
   return { schema_version: 3, generation: 1, type: type, items: items };
 }
+
+
+/** Episodio → shape MovieZone / vimeos lista[] */
+function epToMzLista(ep) {
+  return {
+    temporada: ep.temporada != null ? ep.temporada : ep.season,
+    episodio: ep.episodio != null ? ep.episodio : ep.episode,
+    titulo: ep.titulo || ep.name || null,
+    slug: null,
+    link: null,
+    back_img: ep.back_img || ep.imagen || ep.portada_episodio || null,
+    imagen: ep.imagen || ep.back_img || null,
+    overview: ep.overview || null,
+    air_date: ep.air_date || null,
+    runtime: ep.runtime != null ? ep.runtime : null,
+    es_especial: !!ep.es_especial,
+  };
+}
+
+function mapEstadoTmdb(status) {
+  const s = String(status || "").toLowerCase();
+  if (s === "returning series" || s === "in production") return "En emisión";
+  if (s === "ended") return "Finalizado";
+  if (s === "canceled" || s === "cancelled") return "Cancelado";
+  if (s === "planned") return "Próximamente";
+  if (s === "rumored") return "Rumoreado";
+  return status || null;
+}
+
+function mapTipoMovieZone(kind, item) {
+  if (kind === "movie") return "Pelicula";
+  const gens = (item.genres || []).map(function (g) {
+    return String(g.title || g.name || "").toLowerCase();
+  }).join(" ");
+  const kws = (item.keywords || []).map(function (k) {
+    return String(k.name || "").toLowerCase();
+  }).join(" ");
+  const lang = String(item.original_language || "");
+  if (
+    /animaci[oó]n|animation/.test(gens) ||
+    /anime/.test(kws) ||
+    lang === "ja"
+  ) {
+    return "Anime";
+  }
+  return "Serie";
+}
+
+/**
+ * Convierte item TMDB rico → JSON compatible con vimeos-resolver / MovieZone
+ */
+function toMovieZone(item, kind, opts) {
+  opts = opts || {};
+  const tipo = mapTipoMovieZone(kind, item);
+  const generos = (item.genres || []).map(function (g) {
+    return g.title || g.name || "";
+  }).filter(Boolean);
+
+  const rating =
+    item.vote_average != null ? Math.round(Number(item.vote_average) * 10) / 10 : null;
+
+  const fecha =
+    item.release_date || item.first_air_date || null;
+
+  const dur =
+    item.runtime != null
+      ? item.runtime + (kind === "tv" ? " min. por episodio" : " min")
+      : null;
+
+  const out = {
+    success: true,
+    fuente: "tmdb",
+    source_id: "tmdb",
+    tipo: tipo,
+    formato: item.formato || (kind === "movie" ? "Pelicula" : "TV"),
+    link: null,
+    slug: item.slug || null,
+    tmdb_id: item.tmdb_id,
+    titulo: item.title || null,
+    titulo_original: item.original_title || null,
+    portada: item.portada || null,
+    portada_imdb: item.portada || null,
+    logo: item.logo || null,
+    logo_imdb: item.logo || null,
+    backdrop: item.backdrop || null,
+    portada_fuente_raw: item.portada || null,
+    descripcion: item.overview || null,
+    year: item.year || null,
+    fecha_estreno: fecha,
+    rating: rating,
+    rating_source: "imdb",
+    rating_imdb: rating,
+    generos: generos,
+    duracion_texto: dur,
+    estado: kind === "tv" ? mapEstadoTmdb(item.status) : null,
+    imdb_id: item.imdb_id || null,
+    poster_source: "tmdb",
+    url_extract: null,
+    certification: item.certification || null,
+    trailer: item.trailer || null,
+    trailer_youtube_key: item.trailer_youtube_key || null,
+    actores: (item.cast || []).slice(0, 15).map(function (c) {
+      return c.name;
+    }),
+    cast: item.cast || [],
+    studios: (item.studios || []).map(function (s) {
+      return s.title || s.name;
+    }),
+    // extras TMDB (MovieZone puede ignorarlos)
+    gallery: item.gallery || [],
+    keywords: item.keywords || [],
+    external_ids: item.external_ids || null,
+    schema_version: 3,
+    generation: 1,
+  };
+
+  if (kind === "movie") {
+    out.total = 0;
+    out.reproductores = [];
+  }
+
+  if (kind === "tv") {
+    const temporadas = [];
+
+    // Especiales S0 primero si hay
+    if (item.especiales && (item.especiales.episodes || []).length) {
+      const lista = (item.especiales.episodes || []).map(epToMzLista);
+      temporadas.push({
+        temporada: 0,
+        episodios: lista.length,
+        lista: lista,
+        name: "Especiales",
+        formato: "Especiales",
+      });
+    }
+
+    if (item.temporadas && item.temporadas.length) {
+      item.temporadas.forEach(function (t) {
+        const lista = (t.lista || []).map(epToMzLista);
+        temporadas.push({
+          temporada: t.temporada,
+          episodios: lista.length || t.episodios || 0,
+          lista: lista,
+          name: t.name || ("Temporada " + t.temporada),
+        });
+      });
+    } else if (item.temporadas_meta && item.temporadas_meta.length) {
+      // Sin ?episodes=1: solo meta (conteos), lista vacía
+      item.temporadas_meta.forEach(function (t) {
+        temporadas.push({
+          temporada: t.temporada,
+          episodios: t.episode_count || 0,
+          lista: [],
+          name: t.name || ("Temporada " + t.temporada),
+        });
+      });
+    }
+
+    out.temporadas = temporadas;
+    out.total_temporadas =
+      item.number_of_seasons != null
+        ? item.number_of_seasons
+        : temporadas.filter(function (t) { return t.temporada > 0; }).length;
+    out.total_episodios =
+      item.number_of_episodes != null
+        ? item.number_of_episodes
+        : temporadas.reduce(function (a, t) {
+            return a + (t.episodios || 0);
+          }, 0);
+
+    // related OVA / movies
+    if (item.related_movies && item.related_movies.length) {
+      out.ovas_peliculas = item.related_movies.map(function (m) {
+        return {
+          tmdb_id: m.tmdb_id,
+          tipo: "Pelicula",
+          formato: m.formato || "Pelicula",
+          titulo: m.title,
+          titulo_original: m.original_title,
+          slug: m.slug,
+          portada: m.portada,
+          year: m.year,
+          rating: m.vote_average,
+          descripcion: m.overview,
+        };
+      });
+    }
+
+    if (item.tiene_especiales != null) {
+      out.tiene_especiales = item.tiene_especiales;
+    }
+  }
+
+  // item rico por si se necesita
+  out.item = item;
+  return out;
+}
+
 
 function slugify(s) {
   return (
