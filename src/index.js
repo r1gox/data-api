@@ -1,7 +1,7 @@
 /**
- * TMDB Meta API — data-api (Cloudflare Worker)
- * Películas / series / anime: ficha rica + episodios (título, imagen, overview)
- * Secrets: TMDB_API_KEY (v3) o TMDB_TOKEN (Bearer v4)
+ * TMDB Meta API — data-api (Cloudflare Worker) v1.2
+ * Películas / series / anime: ficha rica, episodios, especiales (S0), OVA/películas relacionadas
+ * Secrets: TMDB_API_KEY (v3) o TMDB_TOKEN (v4)
  */
 
 const TMDB_API = "https://api.themoviedb.org/3";
@@ -32,7 +32,7 @@ export default {
         return json({
           ok: true,
           name: "tmdb-meta-api",
-          version: "1.1.0",
+          version: "1.2.0",
           has_key: resolved.ok,
           key_source: resolved.source,
           env_keys: Object.keys(env).sort(),
@@ -41,19 +41,34 @@ export default {
             "GET /v1/items/movie/:id",
             "GET /v1/items/tv/:id",
             "GET /v1/items/tv/:id?episodes=1",
-            "GET /v1/items/tv/:id/season/:n",
+            "GET /v1/items/tv/:id?specials=1",
+            "GET /v1/items/tv/:id?related=1",
+            "GET /v1/items/tv/:id/season/:n  (0 = especiales)",
+            "GET /v1/items/tv/:id/specials",
             "GET /v1/now?type=movie|tv",
           ],
           hint: resolved.ok
             ? null
-            : "Falta TMDB_API_KEY. Cloudflare → data-api → Secrets",
+            : "Falta TMDB_API_KEY en Cloudflare Secrets",
         });
       }
 
-      // Temporada completa: /v1/items/tv/207468/season/1
-      let m = path.match(/^\/v1\/items\/tv\/(\d+)\/season\/(\d+)$/);
+      // Especiales = temporada 0
+      let m = path.match(/^\/v1\/items\/tv\/(\d+)\/specials$/);
+      if (m) {
+        const data = await getSeason(env, m[1], 0);
+        data.es_especiales = true;
+        data.formato = "Especiales";
+        return json({ schema_version: 3, generation: 1, season: data }, 200, cacheHeaders(env));
+      }
+
+      m = path.match(/^\/v1\/items\/tv\/(\d+)\/season\/(\d+)$/);
       if (m) {
         const data = await getSeason(env, m[1], m[2]);
+        if (Number(m[2]) === 0) {
+          data.es_especiales = true;
+          data.formato = "Especiales";
+        }
         return json({ schema_version: 3, generation: 1, season: data }, 200, cacheHeaders(env));
       }
 
@@ -63,8 +78,21 @@ export default {
           url.searchParams.get("episodes") === "1" ||
           url.searchParams.get("episodes") === "true" ||
           url.searchParams.get("full") === "1";
-        const maxSeasons = parseInt(url.searchParams.get("max_seasons") || "20", 10) || 20;
-        const data = await getItem(env, m[1], m[2], { withEpisodes, maxSeasons });
+        const withSpecials =
+          withEpisodes ||
+          url.searchParams.get("specials") === "1" ||
+          url.searchParams.get("specials") === "true";
+        const withRelated =
+          url.searchParams.get("related") === "1" ||
+          url.searchParams.get("related") === "true" ||
+          withEpisodes;
+        const maxSeasons = parseInt(url.searchParams.get("max_seasons") || "30", 10) || 30;
+        const data = await getItem(env, m[1], m[2], {
+          withEpisodes,
+          withSpecials,
+          withRelated,
+          maxSeasons,
+        });
         return json({ schema_version: 3, generation: 1, item: data }, 200, cacheHeaders(env));
       }
 
@@ -75,7 +103,11 @@ export default {
       }
 
       if (path === "/v1/search") {
-        const q = (url.searchParams.get("q") || url.searchParams.get("query") || "").trim();
+        let q = (url.searchParams.get("q") || url.searchParams.get("query") || "").trim();
+        // slug estilo animeav1 → texto buscable
+        if (q && /-/.test(q) && !/\s/.test(q)) {
+          q = q.replace(/-/g, " ");
+        }
         const page = Math.min(Math.max(parseInt(url.searchParams.get("page") || "1", 10) || 1, 1), 20);
         const type = (url.searchParams.get("type") || "multi").toLowerCase();
         if (!q) return json({ error: "Falta query q" }, 400);
@@ -135,7 +167,7 @@ function resolveTmdbKey(env) {
     else if (key) source = "TMDB_API_KEY";
   }
 
-  // TEMPORAL — borrar cuando el Secret de Cloudflare funcione + regenerar key
+  // TEMP — quitar cuando Secret CF funcione; regenerar key en TMDB
   if (!token && !key) {
     key = "f5149878cdff80ef89d0910a73750279";
     source = "HARDCODED_TEMP";
@@ -163,10 +195,7 @@ function withKey(env, pathAndQuery) {
 async function tmdb(env, pathAndQuery) {
   const resolved = resolveTmdbKey(env);
   if (!resolved.ok) {
-    throw new Error(
-      "Falta TMDB_API_KEY en el Worker. env_keys=" +
-        JSON.stringify(Object.keys(env || {}))
-    );
+    throw new Error("Falta TMDB_API_KEY. env_keys=" + JSON.stringify(Object.keys(env || {})));
   }
   const res = await fetch(withKey(env, pathAndQuery), {
     headers: authHeaders(env),
@@ -193,7 +222,9 @@ function img(path, size) {
 function pickLogo(images) {
   const logos = (images && images.logos) || [];
   if (!logos.length) return null;
-  const en = logos.find(function (x) { return x.iso_639_1 === "en"; }) || logos[0];
+  const en = logos.find(function (x) { return x.iso_639_1 === "en"; }) ||
+    logos.find(function (x) { return x.iso_639_1 === "ja"; }) ||
+    logos[0];
   return en.file_path || null;
 }
 
@@ -202,7 +233,8 @@ function pickTrailer(videos) {
   const yt = list.filter(function (v) {
     return v.site === "YouTube" && (v.type === "Trailer" || v.type === "Teaser");
   });
-  const pick = yt.find(function (v) { return v.type === "Trailer" && v.official; }) ||
+  const pick =
+    yt.find(function (v) { return v.type === "Trailer" && v.official; }) ||
     yt.find(function (v) { return v.type === "Trailer"; }) ||
     yt[0] ||
     list.find(function (v) { return v.site === "YouTube"; });
@@ -235,14 +267,44 @@ function mapCrew(credits) {
     });
 }
 
+/** Clasifica tipo anime/serie según TMDB + keywords */
+function detectFormato(kind, d, keywords) {
+  if (kind === "movie") {
+    const rt = d.runtime || 0;
+    const kws = (keywords || []).map(function (k) { return (k.name || "").toLowerCase(); }).join(" ");
+    if (/ova/.test(kws) || /ova/i.test(d.title || "") || /ova/i.test(d.original_title || "")) return "OVA";
+    if (/ona/.test(kws)) return "ONA";
+    if (rt > 0 && rt < 45) return "Especial";
+    return "Pelicula";
+  }
+  // tv
+  const types = (d.type || "").toLowerCase(); // Scripted, Miniseries, etc.
+  const kws = (keywords || []).map(function (k) { return (k.name || "").toLowerCase(); }).join(" ");
+  if (/ova/.test(kws)) return "OVA";
+  if (/ona/.test(kws)) return "ONA";
+  if (types === "miniseries") return "Miniserie";
+  if ((d.number_of_episodes || 0) <= 1 && (d.number_of_seasons || 0) <= 1) return "Especial";
+  return "TV";
+}
+
 function mapEpisode(ep, seasonNum) {
   const still = ep.still_path || null;
+  const sn = seasonNum != null ? Number(seasonNum) : Number(ep.season_number);
+  const en = Number(ep.episode_number);
+  const isSpecial = sn === 0;
+  const titulo =
+    ep.name && String(ep.name).trim() && !/^episodio\s*\d+$/i.test(ep.name)
+      ? ep.name
+      : isSpecial
+        ? "Especial " + en
+        : "Episodio " + en;
+
   return {
-    temporada: seasonNum != null ? seasonNum : ep.season_number,
-    episodio: ep.episode_number,
-    season: seasonNum != null ? seasonNum : ep.season_number,
-    episode: ep.episode_number,
-    titulo: ep.name || ("Episodio " + ep.episode_number),
+    temporada: sn,
+    episodio: en,
+    season: sn,
+    episode: en,
+    titulo: titulo,
     name: ep.name || null,
     overview: ep.overview || null,
     air_date: ep.air_date || null,
@@ -252,6 +314,8 @@ function mapEpisode(ep, seasonNum) {
     imagen: img(still, "w300"),
     back_img: img(still, "w300"),
     portada_episodio: img(still, "w500"),
+    es_especial: isSpecial,
+    formato: isSpecial ? "Especial" : "Episodio",
   };
 }
 
@@ -263,15 +327,74 @@ async function getSeason(env, tvId, seasonNum) {
   return {
     tmdb_id: Number(tvId),
     season_number: d.season_number != null ? d.season_number : Number(seasonNum),
-    name: d.name || ("Temporada " + seasonNum),
+    temporada: d.season_number != null ? d.season_number : Number(seasonNum),
+    name: d.name || (Number(seasonNum) === 0 ? "Especiales" : "Temporada " + seasonNum),
     overview: d.overview || null,
     air_date: d.air_date || null,
     poster: img(d.poster_path, "w300"),
     poster_path: d.poster_path || null,
     episode_count: episodes.length,
+    episodios: episodes.length,
     episodes: episodes,
     lista: episodes,
   };
+}
+
+async function fetchRelatedMovies(env, tvId, title) {
+  const out = [];
+  const seen = {};
+
+  function pushMovie(r, source) {
+    if (!r || !r.id || seen[r.id]) return;
+    seen[r.id] = true;
+    const poster = r.poster_path || null;
+    out.push({
+      tmdb_id: r.id,
+      kind: "movie",
+      title: r.title || r.original_title || "",
+      original_title: r.original_title || null,
+      slug: slugify(r.title || r.original_title || String(r.id)),
+      portada: img(poster, "w500"),
+      poster_path: poster,
+      year: (r.release_date || "").slice(0, 4) || null,
+      vote_average: r.vote_average != null ? r.vote_average : null,
+      overview: r.overview || null,
+      source: source,
+      formato: detectFormato("movie", r, []),
+    });
+  }
+
+  try {
+    const rec = await tmdb(env, "/tv/" + tvId + "/recommendations?page=1");
+    (rec.results || []).slice(0, 8).forEach(function (r) {
+      // recommendations for TV returns TV mostly — skip non-movie
+      if (r.media_type === "movie" || r.title) pushMovie(r, "recommendations");
+    });
+  } catch (_) {}
+
+  // Búsqueda por título + palabras clave de película/OVA
+  if (title) {
+    const base = String(title).replace(/:.*$/, "").trim();
+    const queries = [base + " movie", base + " film", base + " OVA"];
+    for (let i = 0; i < queries.length; i++) {
+      try {
+        const s = await tmdb(
+          env,
+          "/search/movie?query=" + encodeURIComponent(queries[i]) + "&page=1&include_adult=false"
+        );
+        (s.results || []).slice(0, 5).forEach(function (r) {
+          // filtrar por similitud simple del título
+          const t = (r.title || "").toLowerCase();
+          const b = base.toLowerCase();
+          if (t.indexOf(b.slice(0, Math.min(8, b.length))) >= 0 || b.indexOf(t.slice(0, 8)) >= 0) {
+            pushMovie(r, "search");
+          }
+        });
+      } catch (_) {}
+    }
+  }
+
+  return out.slice(0, 12);
 }
 
 async function getItem(env, kind, id, opts) {
@@ -285,13 +408,14 @@ async function getItem(env, kind, id, opts) {
     env,
     "/" + kind + "/" + id +
       "?append_to_response=" + append +
-      "&include_image_language=en,es,null"
+      "&include_image_language=en,es,ja,null"
   );
 
   const poster = d.poster_path || null;
   const backdrop = d.backdrop_path || null;
   const logo = pickLogo(d.images);
   const trail = pickTrailer(d.videos);
+  const keywordsList = (d.keywords && (d.keywords.keywords || d.keywords.results)) || [];
 
   const year =
     kind === "movie"
@@ -300,12 +424,12 @@ async function getItem(env, kind, id, opts) {
 
   const title = kind === "movie" ? d.title : d.name;
   const original = kind === "movie" ? d.original_title : d.original_name;
+  const formato = detectFormato(kind, d, keywordsList);
 
-  // Certification
   let certification = null;
   if (kind === "movie" && d.release_dates && d.release_dates.results) {
-    const us = d.release_dates.results.find(function (r) { return r.iso_3166_1 === "US"; });
     const mx = d.release_dates.results.find(function (r) { return r.iso_3166_1 === "MX"; });
+    const us = d.release_dates.results.find(function (r) { return r.iso_3166_1 === "US"; });
     const block = mx || us || d.release_dates.results[0];
     const rel = ((block && block.release_dates) || []).find(function (x) { return x.certification; });
     certification = (rel && rel.certification) || null;
@@ -324,6 +448,7 @@ async function getItem(env, kind, id, opts) {
   const item = {
     tmdb_id: d.id,
     kind: kind,
+    formato: formato,
     title: title || original || String(id),
     original_title: original || null,
     slug: slugify(title || original || String(id)),
@@ -364,7 +489,7 @@ async function getItem(env, kind, id, opts) {
     }),
     cast: mapCast(d.credits),
     crew: mapCrew(d.credits),
-    keywords: ((d.keywords && (d.keywords.keywords || d.keywords.results)) || []).slice(0, 20).map(function (k) {
+    keywords: keywordsList.slice(0, 20).map(function (k) {
       return { id: k.id, name: k.name };
     }),
     trailer: trail.trailer,
@@ -372,9 +497,25 @@ async function getItem(env, kind, id, opts) {
     gallery: gallery,
   };
 
-  // Series / anime: lista de temporadas (+ episodios si ?episodes=1)
   if (kind === "tv") {
-    const seasonsMeta = (d.seasons || [])
+    const allSeasons = d.seasons || [];
+    const specialsMeta = allSeasons
+      .filter(function (s) { return s.season_number === 0; })
+      .map(function (s) {
+        return {
+          temporada: 0,
+          season_number: 0,
+          name: s.name || "Especiales",
+          episode_count: s.episode_count || 0,
+          air_date: s.air_date || null,
+          overview: s.overview || null,
+          poster: img(s.poster_path, "w300"),
+          es_especiales: true,
+          formato: "Especiales",
+        };
+      });
+
+    const seasonsMeta = allSeasons
       .filter(function (s) { return s.season_number > 0; })
       .map(function (s) {
         return {
@@ -385,23 +526,39 @@ async function getItem(env, kind, id, opts) {
           air_date: s.air_date || null,
           overview: s.overview || null,
           poster: img(s.poster_path, "w300"),
+          es_especiales: false,
+          formato: "TV",
         };
       });
+
     item.seasons = seasonsMeta;
     item.temporadas_meta = seasonsMeta;
+    item.specials_meta = specialsMeta;
+    item.tiene_especiales = specialsMeta.length > 0 && (specialsMeta[0].episode_count || 0) > 0;
 
+    // Cargar especiales (S0)
+    if (opts.withSpecials && item.tiene_especiales) {
+      try {
+        const sp = await getSeason(env, id, 0);
+        item.especiales = sp;
+        item.specials = sp.episodes || [];
+      } catch (_) {
+        item.especiales = null;
+        item.specials = [];
+      }
+    }
+
+    // Episodios de temporadas regulares
     if (opts.withEpisodes) {
-      const maxS = Math.min(opts.maxSeasons || 20, seasonsMeta.length || 0);
+      const maxS = Math.min(opts.maxSeasons || 30, seasonsMeta.length || 0);
       const toFetch = seasonsMeta.slice(0, maxS);
       const seasonsFull = [];
-      // Paralelo por lotes de 4 (límite Worker)
       for (let i = 0; i < toFetch.length; i += 4) {
         const batch = toFetch.slice(i, i + 4);
         const parts = await Promise.all(
           batch.map(function (s) {
             return getSeason(env, id, s.season_number).catch(function () {
               return {
-                temporada: s.season_number,
                 season_number: s.season_number,
                 name: s.name,
                 episodes: [],
@@ -422,14 +579,28 @@ async function getItem(env, kind, id, opts) {
           poster: s.poster,
         };
       });
-      // Lista plana de episodios
       item.episodios = [];
       seasonsFull.forEach(function (s) {
         (s.episodes || []).forEach(function (ep) {
           item.episodios.push(ep);
         });
       });
+      // Especiales al inicio de la lista plana si se pidieron
+      if (item.specials && item.specials.length) {
+        item.episodios = item.specials.concat(item.episodios);
+      }
       item.total_episodios_listados = item.episodios.length;
+    }
+
+    // Películas / OVA relacionados
+    if (opts.withRelated) {
+      try {
+        item.related_movies = await fetchRelatedMovies(env, id, title || original);
+        item.ovas_peliculas = item.related_movies;
+      } catch (_) {
+        item.related_movies = [];
+        item.ovas_peliculas = [];
+      }
     }
   }
 
@@ -462,9 +633,12 @@ async function search(env, q, page, type) {
       var original = kind === "movie" ? r.original_title : r.original_name;
       var date = kind === "movie" ? r.release_date : r.first_air_date;
       var poster = r.poster_path || null;
+      var rt = r.runtime || 0;
+      var formato = kind === "movie" ? (rt > 0 && rt < 45 ? "Especial" : "Pelicula") : "TV";
       return {
         tmdb_id: r.id,
         kind: kind,
+        formato: formato,
         title: title || original || "",
         original_title: original || null,
         slug: slugify(title || original || String(r.id)),
