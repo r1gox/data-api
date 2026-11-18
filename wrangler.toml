@@ -1,8 +1,8 @@
 name = "kinox-acceso"
-main = "index.js"
+main = "src/index.js"
 compatibility_date = "2025-01-01"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "kinox"
-database_id = "PEGA-AQUI-EL-ID-QUE-TE-DA-wrangler-d1-create"
+database_id = "e60546a1-112b-47f2-b722-48f2eebddb4b"
