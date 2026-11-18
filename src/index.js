@@ -508,13 +508,29 @@ export default {
     if (url.pathname.startsWith("/v1/admin/")) {
       const auth = request.headers.get("authorization") || "";
 
-      if (
-        !env.ADMIN_TOKEN ||
-        !auth.startsWith("Bearer ") ||
-        !igual(auth.slice(7), env.ADMIN_TOKEN)
-      ) {
-        return json({ error: "No autorizado" }, 401);
-      }
+const adminSecret = env.ADMIN_TOKEN;
+
+if (!adminSecret) {
+  return json({
+    error: "ADMIN_TOKEN no está disponible en el entorno del Worker",
+    diagnostic: "SECRET_MISSING"
+  }, 500);
+}
+
+if (!auth.startsWith("Bearer ")) {
+  return json({
+    error: "No llegó el encabezado Authorization",
+    diagnostic: "AUTH_HEADER_MISSING"
+  }, 401);
+}
+
+if (!igual(auth.slice(7).trim(), String(adminSecret).trim())) {
+  return json({
+    error: "La contraseña recibida no coincide con ADMIN_TOKEN",
+    diagnostic: "TOKEN_MISMATCH"
+  }, 401);
+}
+      
 
       // CREAR TOKENS
       if (
