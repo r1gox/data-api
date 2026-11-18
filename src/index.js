@@ -276,14 +276,20 @@ function randomKey() {
          chars.slice(8,12);
 }
 
+
 async function hashKey(key) {
-  const data = new TextEncoder().encode(key);
+  const normalized = String(key || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+
+  const data = new TextEncoder().encode("kinox|" + normalized);
   const digest = await crypto.subtle.digest("SHA-256", data);
 
   return Array.from(new Uint8Array(digest))
-    .map(b => b.toString(16).padStart(2,"0"))
+    .map(b => b.toString(16).padStart(2, "0"))
     .join("");
 }
+
 
 el("loginBtn").onclick = async () => {
   adminToken = el("adminToken").value.trim();
